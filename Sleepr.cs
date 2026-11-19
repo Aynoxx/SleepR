@@ -1,11 +1,11 @@
-// Mode IA — petit utilitaire Windows pour garder le PC allumé (écran éteint, capot fermé)
+// Sleepr — petit utilitaire Windows pour garder le PC allumé (écran éteint, capot fermé)
 // tout en pouvant revenir d'un clic au comportement normal.
 //
 // Ce fichier se compile avec le csc.exe fourni par Windows (pas de SDK à installer) :
 //     build.cmd
 //
 // Modes ligne de commande (pratiques pour tester) :
-//     ModeIA.exe --on | --off | --status | --startup [on|off]
+//     Sleepr.exe --on | --off | --status | --startup [on|off]
 
 using System;
 using System.Collections.Generic;
@@ -22,7 +22,7 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace ModeIA
+namespace Sleepr
 {
     // ---------------------------------------------------------------------
     // Description d'un réglage d'alimentation Windows (sous-groupe + réglage)
@@ -115,10 +115,20 @@ namespace ModeIA
             "a9ceb8da-cd46-44fb-a98b-02af69de4623",
             "Demandes d'éveil de l'écran", 1, 1);
 
+        // « Exiger un mot de passe au réveil » : présent sur les PC en veille S3, absent
+        // sur ceux en veille moderne S0 (où powercfg refuse jusqu'à la lecture). Aucune
+        // valeur de repli n'est fournie : si le réglage n'existe pas, il est simplement
+        // ignoré au lieu de faire échouer l'activation.
+        public static readonly PowerSetting ConsoleLock = new PowerSetting(
+            "SUB_NONE", "CONSOLELOCK",
+            "fea3413e-7e05-4911-9a71-700331f1c294",
+            "0e796bdb-100d-47d6-a2d5-f7d2daa51f51",
+            "Mot de passe au réveil", 0);
+
         public static readonly PowerSetting[] Managed = new PowerSetting[]
         {
             LidAction, PowerButtonAction, SleepTimeout, HibernateTimeout, UnattendedSleep,
-            SystemRequiredRequests, DisplayRequiredRequests
+            SystemRequiredRequests, DisplayRequiredRequests, ConsoleLock
         };
 
         private sealed class CommandResult
@@ -208,7 +218,25 @@ namespace ModeIA
 
             CommandResult a = Run("/setacvalueindex " + schemeGuid + " " + setting.SubgroupAlias + " " + setting.SettingAlias + " " + ac.ToString(CultureInfo.InvariantCulture));
             CommandResult d = Run("/setdcvalueindex " + schemeGuid + " " + setting.SubgroupAlias + " " + setting.SettingAlias + " " + dc.ToString(CultureInfo.InvariantCulture));
-            if (a.Ok && d.Ok) return true;
+            if (a.Ok && d.Ok)
+            {
+                // Remettre aussi la valeur en registre pour les configurations S0 (veille moderne)
+                // où powercfg n'est pas le seul mécanisme pris en compte.
+                try
+                {
+                    using (RegistryKey key = Registry.LocalMachine.CreateSubKey(RegistryPath(schemeGuid, setting)))
+                    {
+                        if (key != null)
+                        {
+                            key.SetValue("ACSettingIndex", ac, RegistryValueKind.DWord);
+                            key.SetValue("DCSettingIndex", dc, RegistryValueKind.DWord);
+                        }
+                    }
+                    Run("/setactive " + schemeGuid);
+                }
+                catch { }
+                return true;
+            }
 
             // Repli : écriture directe (nécessaire pour certains réglages masqués).
             try
@@ -317,13 +345,35 @@ namespace ModeIA
     // ---------------------------------------------------------------------
     internal static class ModeState
     {
+        private const string FolderName = "Sleepr";
+        private const string LegacyFolderName = "ModeIA";
+
+        // L'application s'appelait avant « ModeIA » : si une sauvegarde existe dans
+        // l'ancien dossier, elle est reprise, sinon un mode déjà activé ne pourrait
+        // plus être restauré.
+        static ModeState()
+        {
+            try
+            {
+                string root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string legacy = Path.Combine(root, LegacyFolderName, "etat.txt");
+                string current = Path.Combine(root, FolderName, "etat.txt");
+                if (File.Exists(legacy) && !File.Exists(current))
+                {
+                    Directory.CreateDirectory(Path.Combine(root, FolderName));
+                    File.Move(legacy, current);
+                }
+            }
+            catch { }
+        }
+
         public static string Folder
         {
             get
             {
                 return Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "ModeIA");
+                    FolderName);
             }
         }
 
@@ -387,7 +437,14 @@ namespace ModeIA
                 applied.Add(v);
             }
 
-            SaveState(scheme, saved, keepDisplayAwake);
+            // Verrouillage de session : non bloquant. Si l'écriture échoue, le mode
+            // s'active quand même (on retombera simplement sur l'écran de connexion).
+            int previousLockDelay;
+            bool lockDelayWasSet = LockDelay.TryRead(out previousLockDelay);
+            string lockError;
+            bool lockDelayApplied = LockDelay.Set(LockDelay.Never, out lockError);
+
+            SaveState(scheme, saved, keepDisplayAwake, lockDelayApplied, lockDelayWasSet, previousLockDelay);
             return true;
         }
 
@@ -398,6 +455,9 @@ namespace ModeIA
 
             string scheme = null;
             bool display = true;
+            bool lockDelayHandled = false;
+            bool lockDelayPresent = false;
+            int lockDelayValue = 0;
             List<SavedValue> saved = new List<SavedValue>();
 
             string[] lines;
@@ -430,6 +490,14 @@ namespace ModeIA
                 if (string.Equals(key, "display", StringComparison.OrdinalIgnoreCase))
                 {
                     display = value == "1";
+                    continue;
+                }
+                if (string.Equals(key, "LOCKDELAY", StringComparison.OrdinalIgnoreCase))
+                {
+                    lockDelayHandled = true;
+                    lockDelayPresent = !string.Equals(value, "absent", StringComparison.OrdinalIgnoreCase);
+                    if (lockDelayPresent)
+                        int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out lockDelayValue);
                     continue;
                 }
 
@@ -465,6 +533,15 @@ namespace ModeIA
                     failures.Add(v.Setting.Label + " (" + setError + ")");
             }
 
+            if (lockDelayHandled)
+            {
+                string lockError;
+                bool ok = lockDelayPresent
+                    ? LockDelay.Set(lockDelayValue, out lockError)
+                    : LockDelay.Clear(out lockError);
+                if (!ok) failures.Add("Mot de passe au réveil (" + lockError + ")");
+            }
+
             if (failures.Count > 0)
             {
                 // On garde la sauvegarde pour pouvoir réessayer.
@@ -478,14 +555,21 @@ namespace ModeIA
             return true;
         }
 
-        private static void SaveState(string scheme, List<SavedValue> saved, bool keepDisplayAwake)
+        private static void SaveState(string scheme, List<SavedValue> saved, bool keepDisplayAwake,
+            bool lockDelaySaved, bool lockDelayPresent, int lockDelayValue)
         {
             Directory.CreateDirectory(Folder);
 
             List<string> lines = new List<string>();
-            lines.Add("# Sauvegarde créée par Mode IA — supprimer ce fichier remet le mode normal");
+            lines.Add("# Sauvegarde créée par Sleepr — supprimer ce fichier remet le mode normal");
             lines.Add("scheme=" + scheme);
             lines.Add("display=" + (keepDisplayAwake ? "1" : "0"));
+            if (lockDelaySaved)
+            {
+                lines.Add("LOCKDELAY=" + (lockDelayPresent
+                    ? lockDelayValue.ToString(CultureInfo.InvariantCulture)
+                    : "absent"));
+            }
             foreach (SavedValue v in saved)
             {
                 lines.Add(v.Setting.SettingAlias + "=" +
@@ -493,6 +577,88 @@ namespace ModeIA
                           v.Dc.ToString(CultureInfo.InvariantCulture));
             }
             File.WriteAllLines(FilePath, lines.ToArray());
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Verrouillage de session à l'extinction de l'écran (veille moderne S0)
+    //
+    // Windows n'utilise pas CONSOLELOCK sur ces machines (powercfg refuse même de le
+    // lire) : le délai avant de réclamer le mot de passe après extinction de l'écran
+    // est une valeur utilisateur, HKCU\Control Panel\Desktop\DelayLockInterval, en
+    // secondes, 0xFFFFFFFF signifiant « ne jamais demander ». Aucun droit admin requis.
+    //
+    // Réouverture du capot sans mot de passe = même résultat que « Require sign-in :
+    // Never » dans les Paramètres. À noter : ouvrir la page « Options de connexion »
+    // des Paramètres réécrit cette valeur.
+    // ---------------------------------------------------------------------
+    internal static class LockDelay
+    {
+        private const string KeyPath = @"Control Panel\Desktop";
+        private const string ValueName = "DelayLockInterval";
+
+        // 0xFFFFFFFF : ne jamais réclamer le mot de passe.
+        public const int Never = -1;
+
+        public static bool TryRead(out int value)
+        {
+            value = 0;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(KeyPath))
+                {
+                    if (key == null) return false;
+                    object raw = key.GetValue(ValueName);
+                    if (raw == null) return false;
+                    value = Convert.ToInt32(raw, CultureInfo.InvariantCulture);
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool Set(int value, out string error)
+        {
+            error = null;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(KeyPath))
+                {
+                    if (key == null)
+                    {
+                        error = "clé de registre inaccessible";
+                        return false;
+                    }
+                    key.SetValue(ValueName, value, RegistryValueKind.DWord);
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        public static bool Clear(out string error)
+        {
+            error = null;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(KeyPath, true))
+                {
+                    if (key != null) key.DeleteValue(ValueName, false);
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
         }
     }
 
@@ -506,7 +672,10 @@ namespace ModeIA
     internal static class AutoStart
     {
         private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        private const string ValueName = "ModeIA";
+        private const string ValueName = "Sleepr";
+        // Nom utilisé avant le renommage de l'application : la valeur est supprimée
+        // pour ne pas lancer deux fois l'application (et pas un exécutable disparu).
+        private const string LegacyValueName = "ModeIA";
 
         public static bool IsEnabled
         {
@@ -545,6 +714,7 @@ namespace ModeIA
                         key.SetValue(ValueName, "\"" + Application.ExecutablePath + "\" --tray", RegistryValueKind.String);
                     else
                         key.DeleteValue(ValueName, false);
+                    key.DeleteValue(LegacyValueName, false);
                 }
                 return true;
             }
@@ -569,7 +739,7 @@ namespace ModeIA
     // ---------------------------------------------------------------------
     internal sealed class MainForm : Form
     {
-        private const string AppTitle = "Mode IA";
+        private const string AppTitle = "Sleepr";
 
         // Palette de la carte
         private static readonly Color CardColor = Color.FromArgb(24, 25, 28);
@@ -1030,8 +1200,8 @@ namespace ModeIA
         private void SetupTray()
         {
             ContextMenuStrip menu = new ContextMenuStrip();
-            menu.Items.Add("Ouvrir Mode IA", null, delegate { RestoreWindow(); });
-            _trayToggle.Text = "Activer le mode IA";
+            menu.Items.Add("Ouvrir Sleepr", null, delegate { RestoreWindow(); });
+            _trayToggle.Text = "Activer Sleepr";
             _trayToggle.Click += delegate { ToggleMode(); };
             menu.Items.Add(_trayToggle);
             menu.Items.Add(new ToolStripSeparator());
@@ -1120,7 +1290,7 @@ namespace ModeIA
         {
             _lastKnownActive = _active;
 
-            _modeText = _active ? "Mode IA actif" : "Mode normal";
+            _modeText = _active ? "Sleepr actif" : "Mode normal";
             _modeColor = _active ? ActiveTextColor : TextColor;
 
             // Le curseur glisse vers sa nouvelle position.
@@ -1137,11 +1307,11 @@ namespace ModeIA
 
             // Le titre de la fenêtre est ce qu'affiche la barre des tâches (survol du bouton,
             // vignette du « résumé » des applications) : il porte donc l'état courant.
-            string title = _active ? "Mode IA — actif" : "Mode IA — normal";
+            string title = _active ? "Sleepr — actif" : "Sleepr — normal";
             if (Text != title) Text = title;
             _tray.Icon = _active ? _iconOn : _iconOff;
             _tray.Text = title;
-            _trayToggle.Text = _active ? "Désactiver le mode IA" : "Activer le mode IA";
+            _trayToggle.Text = _active ? "Désactiver Sleepr" : "Activer Sleepr";
 
             UpdateHint();
         }
@@ -1201,15 +1371,16 @@ namespace ModeIA
         private void ShowHelp()
         {
             string message =
-                "Le mode IA modifie le mode d'alimentation actif de Windows :\r\n" +
+                "Sleepr modifie le mode d'alimentation actif de Windows :\r\n" +
                 "  • fermeture du capot : ne rien faire\r\n" +
                 "  • bouton d'alimentation : ne rien faire\r\n" +
                 "  • mise en veille : jamais\r\n" +
-                "  • mise en veille prolongée : jamais\r\n\r\n" +
+                "  • mise en veille prolongée : jamais\r\n" +
+                "  • mot de passe au réveil : jamais (le capot fermé ne renvoie plus à l'écran de connexion)\r\n\r\n" +
                 "L'application demande aussi à Windows de rester éveillé, écran compris : sur un PC récent (veille moderne S0), c'est l'extinction " +
                 "de l'écran qui déclenche la mise en veille, donc c'est indispensable pour que le mode tienne capot fermé. Elle autorise aussi " +
                 "explicitement ces demandes dans les réglages cachés : sans elles, Windows les ignore purement et simplement.\r\n\r\n" +
-                "Cette demande d'éveil n'existe que tant que l'application tourne : « ModeIA.exe --on » lance donc l'interface si besoin, et " +
+                "Cette demande d'éveil n'existe que tant que l'application tourne : « Sleepr.exe --on » lance donc l'interface si besoin, et " +
                 "le menu propose « Démarrer avec Windows » pour qu'elle soit là dès la connexion.\r\n\r\n" +
                 "La fenêtre est une petite carte flottante : fais-la glisser pour la déplacer, et le × l'envoie en arrière-plan (elle continue " +
                 "de tourner, avec son bouton dans la barre des tâches et son icône près de l'horloge). Clic droit sur la carte ou sur l'icône " +
@@ -1229,7 +1400,7 @@ namespace ModeIA
 
             if (_balloonShown) return;
             _balloonShown = true;
-            _tray.BalloonTipTitle = _active ? "Mode IA toujours actif" : "Mode IA en arrière-plan";
+            _tray.BalloonTipTitle = _active ? "Sleepr toujours actif" : "Sleepr en arrière-plan";
             _tray.BalloonTipText = _active
                 ? "Le PC reste éveillé. Clique sur le bouton de la barre des tâches pour rouvrir, ou clic droit sur l'icône > Quitter."
                 : "L'application continue de tourner dans la barre des tâches. Clic droit sur l'icône > Quitter pour l'arrêter.";
@@ -1244,12 +1415,22 @@ namespace ModeIA
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            // Fermer (×, Alt+F4) ne quitte jamais : la fenêtre part en arrière-plan (bouton
-            // de la barre des tâches) pour que l'état reste visible et la demande d'éveil active.
+            // Fermer (×, Alt+F4) ne quitte jamais : la fenêtre part en arrière-plan
+            // sans icône dans la barre des tâches ; l'application continue de tourner
+            // et reste accessible via l'icône de la zone de notification (menu contextuel).
             if (!_exitRequested && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
-                MinimizeToBackground();
+                this.Hide();   // plus de bouton dans la barre des tâches
+                if (!_balloonShown)
+                {
+                    _balloonShown = true;
+                    _tray.BalloonTipTitle = _active ? "Sleepr toujours actif" : "Sleepr en arrière-plan";
+                    _tray.BalloonTipText = _active
+                        ? "Le PC reste éveillé. Clique sur l'icône > Quitter."
+                        : "L'application tourne en arrière-plan. Clic droit > Quitter.";
+                    _tray.ShowBalloonTip(5000);
+                }
                 return;
             }
 
@@ -1399,12 +1580,12 @@ namespace ModeIA
             Application.SetCompatibleTextRenderingDefault(false);
 
             bool created;
-            using (Mutex mutex = new Mutex(true, "ModeIA_single_instance", out created))
+            using (Mutex mutex = new Mutex(true, "Sleepr_single_instance", out created))
             {
                 if (!created)
                 {
-                    MessageBox.Show("Mode IA est déjà lancé (bouton dans la barre des tâches, icône près de l'horloge).",
-                        "Mode IA", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show("Sleepr est déjà lancé (bouton dans la barre des tâches, icône près de l'horloge).",
+                        "Sleepr", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return 0;
                 }
 
@@ -1430,7 +1611,7 @@ namespace ModeIA
                     else if (value == "off" || value == "0" || value == "non") enabled = false;
                     else
                     {
-                        Console.WriteLine("Usage : ModeIA.exe --startup on|off");
+                        Console.WriteLine("Usage : Sleepr.exe --startup on|off");
                         return 1;
                     }
 
@@ -1453,7 +1634,7 @@ namespace ModeIA
                     Console.WriteLine("ERREUR : " + error);
                     return 1;
                 }
-                Console.WriteLine("Mode IA activé (veille/hibernation désactivées, capot et bouton ignorés).");
+                Console.WriteLine("Sleepr activé (veille/hibernation désactivées, capot et bouton ignorés).");
                 Console.WriteLine(PowerCfg.DescribeCurrent());
 
                 // Les réglages powercfg ne suffisent pas : la demande d'éveil n'existe que
@@ -1489,11 +1670,11 @@ namespace ModeIA
 
         // L'interface est le seul porteur de la demande d'éveil : sans elle, le mode
         // n'empêche rien. On la détecte par son processus (le processus courant, qui
-        // est aussi ModeIA.exe en ligne de commande, ne compte pas).
+        // est aussi Sleepr.exe en ligne de commande, ne compte pas).
         private static bool IsGuiRunning()
         {
             int self = Process.GetCurrentProcess().Id;
-            foreach (Process p in Process.GetProcessesByName("ModeIA"))
+            foreach (Process p in Process.GetProcessesByName("Sleepr"))
             {
                 try
                 {
