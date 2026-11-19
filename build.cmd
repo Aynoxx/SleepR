@@ -12,6 +12,7 @@ if not exist "%CSC%" (
 cd /d "%~dp0"
 "%CSC%" -nologo -codepage:65001 -target:winexe -platform:anycpu -optimize+ ^
     -out:Sleepr.exe -win32manifest:app.manifest ^
+    -win32icon:Sleepr.ico ^
     -r:System.dll -r:System.Windows.Forms.dll -r:System.Drawing.dll ^
     Sleepr.cs
 if errorlevel 1 (

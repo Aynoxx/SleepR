@@ -62,9 +62,7 @@ récents, c'est l'extinction de l'écran qui déclenche la mise en veille. Cette
 le capot de couper le rétroéclairage : l'écran reste noir, le PC continue de calculer.
 
 Les valeurs d'origine sont stockées dans `%LOCALAPPDATA%\Sleepr\etat.txt` et servent à la
-restauration. Une sauvegarde de l'ancien nom (`%LOCALAPPDATA%\ModeIA\etat.txt`) est reprise
-automatiquement au premier lancement. Supprimer ce fichier revient à considérer que le mode est
-inactif.
+restauration. Une ancienne sauvegarde issue de l'ancien nom (`%LOCALAPPDATA%\ModeIA\etat.txt`) peut être reprise automatiquement au premier lancement si le fichier existe dans l'ancien emplacement. Supprimer ce fichier revient à considérer que le mode est inactif.
 
 ## Ligne de commande (pratique pour tester)
 
@@ -86,6 +84,10 @@ droits administrateur, et lance l'application avec `--tray`.
 
 Lance `build.cmd`. Il utilise le compilateur C# livré avec Windows
 (`C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`), donc aucun SDK ni paquet à installer.
+
+L'icône `Sleepr.ico` est compilée dans l'exécutable (`-win32icon`, une seule copie) : c'est elle
+qui s'affiche dans l'Explorateur, la barre des tâches et la zone de notification (avec une
+pastille verte quand Sleepr est actif).
 
 ## Désinstaller
 

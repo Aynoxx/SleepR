@@ -34,7 +34,7 @@ namespace Sleepr
         public readonly string SubgroupGuid;
         public readonly string SettingGuid;
         public readonly string Label;
-        // Valeur écrite en mode IA (0 pour les délais, 1 pour les autorisations d'éveil).
+        // Valeur écrite en mode Sleepr (0 pour les délais, 1 pour les autorisations d'éveil).
         public readonly int ActiveValue;
         // Valeur supposée quand la clé de registre n'existe pas encore : c'est le cas des
         // réglages masqués jamais touchés, dont le défaut Windows est connu.
@@ -341,16 +341,16 @@ namespace Sleepr
     }
 
     // ---------------------------------------------------------------------
-    // État « mode IA » : sauvegarde des réglages puis restauration
+    // État de protection : sauvegarde des réglages puis restauration
     // ---------------------------------------------------------------------
     internal static class ModeState
     {
         private const string FolderName = "Sleepr";
         private const string LegacyFolderName = "ModeIA";
 
-        // L'application s'appelait avant « ModeIA » : si une sauvegarde existe dans
-        // l'ancien dossier, elle est reprise, sinon un mode déjà activé ne pourrait
-        // plus être restauré.
+        // Anciennement appelé « ModeIA » : si une sauvegarde existe dans l'ancien dossier,
+        // elle est reprise automatiquement au premier lancement de Sleepr.
+        // Sinon, un mode déjà activé ne pourrait plus être restauré.
         static ModeState()
         {
             try
@@ -673,7 +673,7 @@ namespace Sleepr
     {
         private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string ValueName = "Sleepr";
-        // Nom utilisé avant le renommage de l'application : la valeur est supprimée
+        // Ancienne clé de registre (ancien nom de l'application) : supprimée
         // pour ne pas lancer deux fois l'application (et pas un exécutable disparu).
         private const string LegacyValueName = "ModeIA";
 
@@ -851,7 +851,7 @@ namespace Sleepr
 
         private float _scale = 1f;
         private Size _surface = new Size(220, 132);   // taille logique de la carte (avant mise à l'échelle DPI)
-        private float _position;      // 0 = à gauche (mode normal), 1 = à droite (mode IA)
+        private float _position;      // 0 = à gauche (mode normal), 1 = mode actif
         private bool _hoverSwitch;
         private bool _pressedSwitch;
         private bool _hoverClose;
@@ -867,6 +867,7 @@ namespace Sleepr
         private Color _modeColor = TextColor;
         private Color _hintColor = HintColor;
 
+        private Icon _iconApp;
         private Icon _iconOn;
         private Icon _iconOff;
 
@@ -895,9 +896,10 @@ namespace Sleepr
                      ControlStyles.OptimizedDoubleBuffer, true);
             ClientSize = new Size(220, 132);
 
-            _iconOn = MakeIcon(Color.FromArgb(30, 142, 62));
-            _iconOff = MakeIcon(Color.FromArgb(110, 110, 110));
-            Icon = _iconOn;
+            _iconApp = LoadAppIcon();
+            _iconOn = MakeStatusIcon(_iconApp, Color.FromArgb(46, 204, 113), true);
+            _iconOff = MakeStatusIcon(_iconApp, Color.FromArgb(140, 146, 156), false);
+            Icon = _iconApp != null ? _iconApp : _iconOn;
 
             _animation.Interval = 15;
             _animation.Tick += delegate { StepAnimation(); };
@@ -948,25 +950,69 @@ namespace Sleepr
 
         // ----- Apparence ---------------------------------------------------
 
-        private static Icon MakeIcon(Color color)
+        // Icône de l'application : celle compilée dans l'exécutable (-win32icon dans
+        // build.cmd, donc embarquée une seule fois), sinon lue à côté de l'exécutable.
+        private static Icon LoadAppIcon()
         {
-            using (Bitmap bitmap = new Bitmap(32, 32))
+            try
+            {
+                Icon fromExe = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                if (fromExe != null)
+                    return fromExe;
+            }
+            catch { }
+
+            try
+            {
+                string file = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "Sleepr.ico");
+                if (File.Exists(file))
+                {
+                    using (Icon loaded = new Icon(file, new Size(32, 32)))
+                        return (Icon)loaded.Clone();
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        // Icône de la zone de notification : l'icône de l'application, plus une pastille
+        // verte quand Sleepr protège la machine. L'ancienne icône ronde sert de repli si
+        // aucune icône n'est disponible.
+        private static Icon MakeStatusIcon(Icon source, Color badge, bool showBadge)
+        {
+            using (Bitmap bitmap = new Bitmap(32, 32, PixelFormat.Format32bppArgb))
             {
                 using (Graphics g = Graphics.FromImage(bitmap))
                 {
                     g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.Clear(Color.Transparent);
-                    using (SolidBrush brush = new SolidBrush(color))
+
+                    if (source != null)
                     {
-                        g.FillEllipse(brush, 1, 1, 30, 30);
+                        g.DrawIcon(source, new Rectangle(0, 0, 32, 32));
                     }
-                    using (Font font = new Font("Segoe UI", 12F, FontStyle.Bold, GraphicsUnit.Pixel))
-                    using (SolidBrush white = new SolidBrush(Color.White))
-                    using (StringFormat format = new StringFormat())
+                    else
                     {
-                        format.Alignment = StringAlignment.Center;
-                        format.LineAlignment = StringAlignment.Center;
-                        g.DrawString("IA", font, white, new RectangleF(0, 0, 32, 32), format);
+                        using (SolidBrush brush = new SolidBrush(Color.FromArgb(58, 92, 214)))
+                            g.FillEllipse(brush, 1, 1, 30, 30);
+                        using (Font font = new Font("Segoe UI", 12F, FontStyle.Bold, GraphicsUnit.Pixel))
+                        using (SolidBrush white = new SolidBrush(Color.White))
+                        using (StringFormat format = new StringFormat())
+                        {
+                            format.Alignment = StringAlignment.Center;
+                            format.LineAlignment = StringAlignment.Center;
+                            g.DrawString("S", font, white, new RectangleF(0, 0, 32, 32), format);
+                        }
+                    }
+
+                    if (showBadge)
+                    {
+                        using (SolidBrush halo = new SolidBrush(Color.FromArgb(240, 24, 25, 28)))
+                            g.FillEllipse(halo, 15, 15, 17, 17);
+                        using (SolidBrush dot = new SolidBrush(badge))
+                            g.FillEllipse(dot, 18, 18, 11, 11);
                     }
                 }
 
@@ -1671,6 +1717,7 @@ namespace Sleepr
                 _animation.Dispose();
                 _tray.Visible = false;
                 _tray.Dispose();
+                if (_iconApp != null) _iconApp.Dispose();
                 if (_iconOn != null) _iconOn.Dispose();
                 if (_iconOff != null) _iconOff.Dispose();
             }
