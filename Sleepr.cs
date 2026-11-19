@@ -1,4 +1,5 @@
 // Sleepr — petit utilitaire Windows pour garder le PC allumé (écran éteint, capot fermé)
+// tout en pouvant revenir d'un clic au comportement normal.
 //
 // Ce fichier se compile avec le csc.exe fourni par Windows (pas de SDK à installer) :
 //     build.cmd
@@ -124,7 +125,8 @@ namespace Sleepr
             "0e796bdb-100d-47d6-a2d5-f7d2daa51f51",
             "Mot de passe au réveil", 0);
 
-        public static readonly PowerSetting[] Managed = new PowerSetting[]{
+        public static readonly PowerSetting[] Managed = new PowerSetting[]
+        {
             LidAction, PowerButtonAction, SleepTimeout, HibernateTimeout, UnattendedSleep,
             SystemRequiredRequests, DisplayRequiredRequests, ConsoleLock
         };
@@ -315,8 +317,8 @@ namespace Sleepr
 
         private static string RegistryPath(string schemeGuid, PowerSetting setting)
         {
-            return "SYSTEM\\\\CurrentControlSet\\\\Control\\\\Power\\\\User\\\\PowerSchemes\\\\" + schemeGuid +
-                   "\\\\" + setting.SubgroupGuid + "\\\\" + setting.SettingGuid;
+            return "SYSTEM\\CurrentControlSet\\Control\\Power\\User\\PowerSchemes\\" + schemeGuid +
+                   "\\" + setting.SubgroupGuid + "\\" + setting.SettingGuid;
         }
 
         private static int? ReadRegistryValue(string schemeGuid, PowerSetting setting, string valueName)
@@ -580,19 +582,19 @@ namespace Sleepr
 
     // ---------------------------------------------------------------------
     // Verrouillage de session à l'extinction de l'écran (veille moderne S0)
-    //\
+    //
     // Windows n'utilise pas CONSOLELOCK sur ces machines (powercfg refuse même de le
     // lire) : le délai avant de réclamer le mot de passe après extinction de l'écran
-    // est une valeur utilisateur, HKCU\\Control Panel\\Desktop\\DelayLockInterval, en
+    // est une valeur utilisateur, HKCU\Control Panel\Desktop\DelayLockInterval, en
     // secondes, 0xFFFFFFFF signifiant « ne jamais demander ». Aucun droit admin requis.
-    //\
+    //
     // Réouverture du capot sans mot de passe = même résultat que « Require sign-in :
     // Never » dans les Paramètres. À noter : ouvrir la page « Options de connexion »
     // des Paramètres réécrit cette valeur.
     // ---------------------------------------------------------------------
     internal static class LockDelay
     {
-        private const string KeyPath = "Control Panel\\Desktop";
+        private const string KeyPath = @"Control Panel\Desktop";
         private const string ValueName = "DelayLockInterval";
 
         // 0xFFFFFFFF : ne jamais réclamer le mot de passe.
@@ -662,14 +664,14 @@ namespace Sleepr
 
     // ---------------------------------------------------------------------
     // Démarrage automatique à l'ouverture de session
-    //\
-    // Clé HKCU\\…\\Run : aucun droit administrateur, et rien d'autre n'est écrit.
+    //
+    // Clé HKCU\…\Run : aucun droit administrateur, et rien d'autre n'est écrit.
     // L'application est lancée avec --tray pour rester en arrière-plan : c'est la
     // seule façon d'être sûr que la demande d'éveil est portée dès la connexion.
     // ---------------------------------------------------------------------
     internal static class AutoStart
     {
-        private const string RunKey = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string ValueName = "Sleepr";
         // Nom utilisé avant le renommage de l'application : la valeur est supprimée
         // pour ne pas lancer deux fois l'application (et pas un exécutable disparu).
@@ -725,8 +727,92 @@ namespace Sleepr
     }
 
     // ---------------------------------------------------------------------
+    // Journal des erreurs : une exception non gérée ne doit pas faire
+    // disparaître l'application en silence (et avec elle la demande d'éveil).
+    // ---------------------------------------------------------------------
+    internal static class CrashLog
+    {
+        private static string FilePath
+        {
+            get { return Path.Combine(ModeState.Folder, "crash.txt"); }
+        }
+
+        public static void Write(string context, Exception error)
+        {
+            try
+            {
+                Directory.CreateDirectory(ModeState.Folder);
+                StringBuilder text = new StringBuilder();
+                text.AppendLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "  " + context);
+                if (error != null) text.AppendLine(error.ToString());
+                text.AppendLine();
+                File.AppendAllText(FilePath, text.ToString(), Encoding.UTF8);
+            }
+            catch { }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Position de la carte, mémorisée d'une session à l'autre
+    // ---------------------------------------------------------------------
+    internal static class PositionStore
+    {
+        private static string FilePath
+        {
+            get { return Path.Combine(ModeState.Folder, "position.txt"); }
+        }
+
+        public static bool TryRead(out Point location)
+        {
+            location = Point.Empty;
+            try
+            {
+                if (!File.Exists(FilePath)) return false;
+                string[] parts = File.ReadAllText(FilePath).Trim().Split(',');
+                if (parts.Length != 2) return false;
+
+                int x;
+                int y;
+                if (!int.TryParse(parts[0].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out x)) return false;
+                if (!int.TryParse(parts[1].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out y)) return false;
+
+                location = new Point(x, y);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static void Save(Point location)
+        {
+            try
+            {
+                Directory.CreateDirectory(ModeState.Folder);
+                File.WriteAllText(FilePath,
+                    location.X.ToString(CultureInfo.InvariantCulture) + "," +
+                    location.Y.ToString(CultureInfo.InvariantCulture));
+            }
+            catch { }
+        }
+
+        // La position enregistrée n'est réutilisée que si la carte tombe encore sur un
+        // écran : après un débranchement de moniteur, elle pourrait être hors champ.
+        public static bool IsOnScreen(Point location, Size size)
+        {
+            Rectangle bounds = new Rectangle(location, size);
+            foreach (Screen screen in Screen.AllScreens)
+            {
+                if (screen.WorkingArea.IntersectsWith(bounds)) return true;
+            }
+            return false;
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Fenêtre principale
-    //\
+    //
     // C'est une fenêtre superposée (WS_EX_LAYERED) composée par pixel : le
     // contenu est entièrement dessiné dans un bitmap ARGB puis présenté via
     // UpdateLayeredWindow. On obtient une carte translucide aux coins
@@ -747,6 +833,9 @@ namespace Sleepr
         private static readonly Color WarnColor = Color.FromArgb(246, 190, 92);
         private static readonly Color TrackOff = Color.FromArgb(96, 100, 108);
         private static readonly Color TrackOn = Color.FromArgb(34, 160, 74);
+        private static readonly Color CardTop = Color.FromArgb(35, 37, 43);
+        private static readonly Color CardBottom = Color.FromArgb(19, 20, 23);
+        private static readonly Color AccentColor = Color.FromArgb(72, 214, 126);
 
         private readonly NotifyIcon _tray = new NotifyIcon();
         private readonly ToolStripMenuItem _trayToggle = new ToolStripMenuItem();
@@ -791,6 +880,8 @@ namespace Sleepr
             _startHidden = startHidden;
             Text = AppTitle;
             FormBorderStyle = FormBorderStyle.None;
+            // Pas de bouton dans la barre des tâches : la carte vit dans la zone de
+            // notification et se rouvre par son icône.
             ShowInTaskbar = false;
             MaximizeBox = false;
             MinimizeBox = false;
@@ -812,23 +903,37 @@ namespace Sleepr
             _animation.Tick += delegate { StepAnimation(); };
 
             SetupTray();
+            SystemEvents.PowerModeChanged += OnPowerModeChanged;
 
             _timer.Interval = 3000;
             _timer.Tick += delegate
             {
-                // Le mode peut être basculé ailleurs (ligne de commande, autre session) :
-                // la demande d'éveil doit suivre, sinon l'application afficherait « actif »
-                // sans rien empêcher.
-                bool active = ModeState.IsActive;
-                if (active != _active)
+                try
                 {
-                    _active = active;
-                    if (_active) ApplyExecutionState();
-                    else ReleaseExecutionState();
-                }
+                    // Le mode peut être basculé ailleurs (ligne de commande, autre session) :
+                    // la demande d'éveil doit suivre, sinon l'application afficherait « actif »
+                    // sans rien empêcher.
+                    bool active = ModeState.IsActive;
+                    if (active != _active)
+                    {
+                        _active = active;
+                        if (_active) ApplyExecutionState();
+                        else ReleaseExecutionState();
+                    }
 
-                if (_active != _lastKnownActive) RefreshUi();
-                else UpdateHint();
+                    // Ré-affirmation régulière : Windows peut oublier la demande d'éveil
+                    // après un réveil ou un changement de session, et une demande perdue
+                    // suffit à laisser le PC s'endormir au mauvais moment.
+                    if (_active) ApplyExecutionState();
+
+                    if (_active != _lastKnownActive) RefreshUi();
+                    else UpdateHint();
+                }
+                catch
+                {
+                    // Une exception ici ne doit jamais arrêter le minuteur : ce serait
+                    // perdre la demande d'éveil sans prévenir.
+                }
             };
             _timer.Start();
 
@@ -933,8 +1038,9 @@ namespace Sleepr
             int switchHeight = S(46);
             _switchRect = new Rectangle((width - switchWidth) / 2, S(42), switchWidth, switchHeight);
 
-            int close = S(20);
-            _closeRect = new Rectangle(width - S(8) - close, S(10), close, close);
+            // Cible de clic un peu plus large que le dessin : 24 px, comme un vrai bouton.
+            int close = S(24);
+            _closeRect = new Rectangle(width - S(8) - close, S(8), close, close);
         }
 
         // ----- Rendu -------------------------------------------------------
@@ -979,11 +1085,21 @@ namespace Sleepr
 
             using (GraphicsPath path = RoundedRect(card, S(18)))
             {
-                int alpha = (_hoverSwitch || _hoverClose || _dragging) ? 246 : 236;
-                using (SolidBrush brush = new SolidBrush(Color.FromArgb(alpha, CardColor)))
+                // Dégradé vertical discret : la carte se détache mieux d'un fond clair
+                // qu'un aplat unique, sans jamais devenir opaque.
+                int alpha = (_hoverSwitch || _hoverClose || _dragging) ? 250 : 240;
+                using (LinearGradientBrush brush = new LinearGradientBrush(
+                    new Rectangle(card.X, card.Y, card.Width, card.Height + 1),
+                    Color.FromArgb(alpha, CardTop),
+                    Color.FromArgb(alpha, CardBottom),
+                    LinearGradientMode.Vertical))
                     g.FillPath(brush, path);
 
-                using (Pen pen = new Pen(Color.FromArgb(34, 255, 255, 255), Math.Max(1f, SF(1f))))
+                // Liseré : vert quand Sleepr protège la machine, blanc très discret sinon.
+                Color border = _active
+                    ? Color.FromArgb(78, AccentColor)
+                    : Color.FromArgb(26, 255, 255, 255);
+                using (Pen pen = new Pen(border, Math.Max(1f, SF(1f))))
                     g.DrawPath(pen, path);
             }
 
@@ -998,15 +1114,22 @@ namespace Sleepr
                 g.DrawString(_modeText, font, brush, new RectangleF(0, S(12), width, S(28)), format);
             }
 
+            // Au survol du « × », l'indice explique ce que fait le bouton : masquer sans
+            // arrêter la protection. C'est le doute qui pousse à quitter pour de bon.
+            string hint = _hoverClose
+                ? (_active ? "Masquer · reste actif" : "Masquer · tourne en fond")
+                : _hintText;
+            Color hintColor = _hoverClose ? Color.FromArgb(216, 220, 226) : _hintColor;
+
             using (StringFormat format = new StringFormat())
             using (Font font = MakeFont(8f, FontStyle.Regular))
-            using (SolidBrush brush = new SolidBrush(_hintColor))
+            using (SolidBrush brush = new SolidBrush(hintColor))
             {
                 format.Alignment = StringAlignment.Center;
                 format.LineAlignment = StringAlignment.Center;
                 format.FormatFlags = StringFormatFlags.NoWrap;
                 format.Trimming = StringTrimming.EllipsisCharacter;
-                g.DrawString(_hintText, font, brush, new RectangleF(S(10), S(94), width - S(20), S(22)), format);
+                g.DrawString(hint, font, brush, new RectangleF(S(10), S(94), width - S(20), S(22)), format);
             }
         }
 
@@ -1023,6 +1146,15 @@ namespace Sleepr
             using (SolidBrush brush = new SolidBrush(trackColor))
                 g.FillPath(brush, path);
 
+            // Reflet supérieur : donne du relief au rail sans ajouter de bordure.
+            Rectangle sheen = new Rectangle(track.X + S(6), track.Y + S(3), track.Width - S(12), S(9));
+            if (sheen.Width > 0 && sheen.Height > 0)
+            {
+                using (GraphicsPath sheenPath = RoundedRect(sheen, sheen.Height / 2))
+                using (SolidBrush sheenBrush = new SolidBrush(Color.FromArgb(22, 255, 255, 255)))
+                    g.FillPath(sheenBrush, sheenPath);
+            }
+
             int knobSize = track.Height - S(8);
             float travel = track.Width - knobSize - S(8);
             float knobX = track.Left + S(4) + travel * _position;
@@ -1033,6 +1165,9 @@ namespace Sleepr
 
             using (SolidBrush knob = new SolidBrush(Color.FromArgb(252, 253, 255)))
                 g.FillEllipse(knob, knobX, knobY, knobSize, knobSize);
+
+            using (Pen ring = new Pen(Color.FromArgb(16, 0, 0, 0), Math.Max(1f, SF(1f))))
+                g.DrawEllipse(ring, knobX, knobY, knobSize, knobSize);
         }
 
         private void DrawClose(Graphics g)
@@ -1044,7 +1179,7 @@ namespace Sleepr
             }
 
             int alpha = _pressedClose ? 240 : (_hoverClose ? 200 : 120);
-            int inset = S(6);
+            int inset = S(7);
 
             using (Pen pen = new Pen(Color.FromArgb(alpha, 255, 255, 255), Math.Max(1f, SF(1.6f))))
             {
@@ -1139,11 +1274,15 @@ namespace Sleepr
 
             bool overSwitch = _switchRect.Contains(e.Location);
             bool overClose = _closeRect.Contains(e.Location);
+
+            // Sur le corps de la carte, le curseur dit qu'elle se déplace (il n'y a ni
+            // barre de titre ni bordure pour l'indiquer autrement).
+            Cursor = (overSwitch || overClose) ? Cursors.Hand : Cursors.SizeAll;
+
             if (overSwitch == _hoverSwitch && overClose == _hoverClose) return;
 
             _hoverSwitch = overSwitch;
             _hoverClose = overClose;
-            Cursor = (overSwitch || overClose) ? Cursors.Hand : Cursors.Default;
             Render();
         }
 
@@ -1156,6 +1295,7 @@ namespace Sleepr
             if (_dragging)
             {
                 _dragging = false;
+                PositionStore.Save(Location);
                 Render();
                 return;
             }
@@ -1166,7 +1306,9 @@ namespace Sleepr
             _pressedClose = false;
 
             if (wasSwitch && _switchRect.Contains(e.Location)) ToggleMode();
-            else if (wasClose && _closeRect.Contains(e.Location)) Quit();
+            else if (wasClose && _closeRect.Contains(e.Location)) MinimizeToBackground();
+            // Fermer la carte ne coupe jamais la protection : l'application continue de
+            // tourner en arrière-plan (icône près de l'horloge) et garde le PC éveillé.
 
             Render();
         }
@@ -1190,7 +1332,25 @@ namespace Sleepr
                 e.Handled = true;
                 return;
             }
+
+            if (e.KeyCode == Keys.Escape)
+            {
+                MinimizeToBackground();
+                e.Handled = true;
+                return;
+            }
+
             base.OnKeyDown(e);
+        }
+
+        // Double-clic sur la carte : bascule immédiate, sans viser l'interrupteur.
+        protected override void OnDoubleClick(EventArgs e)
+        {
+            base.OnDoubleClick(e);
+
+            Point point = PointToClient(Cursor.Position);
+            if (_switchRect.Contains(point) || _closeRect.Contains(point)) return;
+            ToggleMode();
         }
 
         // ----- Zone de notification ----------------------------------------
@@ -1216,7 +1376,7 @@ namespace Sleepr
             _tray.Text = AppTitle;
             _tray.ContextMenuStrip = menu;
             _tray.Visible = true;
-            _tray.DoubleClick += delegate { RestoreWindow(); }
+            _tray.DoubleClick += delegate { RestoreWindow(); };
         }
 
         private void SetStartup(bool enabled)
@@ -1233,14 +1393,34 @@ namespace Sleepr
         {
             Show();
             WindowState = FormWindowState.Normal;
+
+            // Si l'écran a changé depuis la dernière fois, la carte revient au centre.
+            if (!PositionStore.IsOnScreen(Location, _surface)) CenterOnScreen();
+
             Activate();
             Render();
+        }
+
+        private void CenterOnScreen()
+        {
+            Rectangle area = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Location = new Point(
+                area.Left + (area.Width - _surface.Width) / 2,
+                area.Top + (area.Height - _surface.Height) / 2);
         }
 
         private void Quit()
         {
             if (_active)
             {
+                // Quitter pour de bon rend la veille possible : une confirmation évite de
+                // perdre un calcul long sur un clic de trop.
+                DialogResult answer = MessageBox.Show(this,
+                    "Sleepr est actif : quitter arrête la protection et rend de nouveau possible "
+                    + "la mise en veille du PC.\r\n\r\nQuitter quand même ?",
+                    AppTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+                if (answer != DialogResult.Yes) return;
+
                 string error;
                 if (!ModeState.Deactivate(out error) && error != null)
                 {
@@ -1276,5 +1456,484 @@ namespace Sleepr
                 ReleaseExecutionState();
                 if (!ModeState.Deactivate(out error) && error != null)
                 {
+                    MessageBox.Show(this, error, AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                _active = ModeState.IsActive;
+            }
 
-[read_files: showing lines 1-1280 of 1710. The window was shortened to stay under 50 000 characters. Use code_search to locate the part you need and read a window around it, or call read_files again with offset=1281 to continue.]
+            RefreshUi();
+        }
+
+        private void RefreshUi()
+        {
+            _lastKnownActive = _active;
+
+            _modeText = _active ? "Sleepr actif" : "Mode normal";
+            _modeColor = _active ? ActiveTextColor : TextColor;
+
+            // Le curseur glisse vers sa nouvelle position.
+            float target = _active ? 1f : 0f;
+            if (Math.Abs(_position - target) < 0.02f)
+            {
+                _position = target;
+                _animation.Stop();
+            }
+            else
+            {
+                _animation.Start();
+            }
+
+            // Le titre de la fenêtre est ce qu'affiche la barre des tâches (survol du bouton,
+            // vignette du « résumé » des applications) : il porte donc l'état courant.
+            string title = _active ? "Sleepr — actif" : "Sleepr — normal";
+            if (Text != title) Text = title;
+            _tray.Icon = _active ? _iconOn : _iconOff;
+            _tray.Text = title;
+            _trayToggle.Text = _active ? "Désactiver Sleepr" : "Activer Sleepr";
+
+            UpdateHint();
+        }
+
+        private void StepAnimation()
+        {
+            float target = _active ? 1f : 0f;
+            float delta = target - _position;
+
+            if (Math.Abs(delta) <= 0.04f)
+            {
+                _position = target;
+                _animation.Stop();
+            }
+            else
+            {
+                _position += delta * 0.35f;   // glissement qui ralentit en fin de course
+            }
+
+            Render();
+        }
+
+        private void UpdateHint()
+        {
+            string text;
+            Color color;
+
+            bool onBattery = SystemInformation.PowerStatus.PowerLineStatus != PowerLineStatus.Online;
+
+            if (_active && onBattery)
+            {
+                float level = SystemInformation.PowerStatus.BatteryLifePercent;
+                string percent = (level >= 0f && level <= 1f)
+                    ? " (" + (int)Math.Round(level * 100f) + " %)"
+                    : "";
+                text = "Batterie" + percent + " · branche le chargeur";
+                color = WarnColor;
+            }
+            else if (_active)
+            {
+                text = "Écran éteint · capot ignoré";
+                color = Color.FromArgb(198, 204, 212);
+            }
+            else
+            {
+                text = "Comportement normal";
+                color = HintColor;
+            }
+
+            // Le minuteur passe toutes les 3 s : on ne redessine que si l'indice change
+            // vraiment (et seulement si la carte est visible).
+            if (text == _hintText && color == _hintColor) return;
+            _hintText = text;
+            _hintColor = color;
+            if (Visible) Render();
+        }
+
+        private void ApplyExecutionState()
+        {
+            Native.SetThreadExecutionState(
+                ExecutionState.Continuous | ExecutionState.SystemRequired | ExecutionState.DisplayRequired);
+        }
+
+        private void ReleaseExecutionState()
+        {
+            Native.SetThreadExecutionState(ExecutionState.Continuous);
+        }
+
+        // Après une veille ou un changement de session, Windows peut avoir perdu la
+        // demande d'éveil : on la repose tout de suite plutôt que d'attendre.
+        private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+        {
+            if (e.Mode != PowerModes.Resume) return;
+            if (_active) ApplyExecutionState();
+            UpdateHint();
+        }
+
+        private void ShowHelp()
+        {
+            string message =
+                "Sleepr modifie le mode d'alimentation actif de Windows :\r\n" +
+                "  • fermeture du capot : ne rien faire\r\n" +
+                "  • bouton d'alimentation : ne rien faire\r\n" +
+                "  • mise en veille : jamais\r\n" +
+                "  • mise en veille prolongée : jamais\r\n" +
+                "  • mot de passe au réveil : jamais (le capot fermé ne renvoie plus à l'écran de connexion)\r\n\r\n" +
+                "L'application demande aussi à Windows de rester éveillé, écran compris : sur un PC récent (veille moderne S0), c'est l'extinction " +
+                "de l'écran qui déclenche la mise en veille, donc c'est indispensable pour que le mode tienne capot fermé. Elle autorise aussi " +
+                "explicitement ces demandes dans les réglages cachés : sans elles, Windows les ignore purement et simplement.\r\n\r\n" +
+                "Cette demande d'éveil n'existe que tant que l'application tourne : « Sleepr.exe --on » lance donc l'interface si besoin, et " +
+                "le menu propose « Démarrer avec Windows » pour qu'elle soit là dès la connexion.\r\n\r\n" +
+                "La fenêtre est une petite carte flottante : fais-la glisser pour la déplacer, double-clique dessus pour basculer le mode, " +
+                "et le × la masque simplement. Masquée, elle continue de tourner dans la zone de notification (icône près de l'horloge) et " +
+                "garde le PC éveillé ; Échap fait la même chose. Clic droit sur la carte ou sur l'icône pour le menu, dont « Quitter », qui " +
+                "arrête vraiment Sleepr et remet les réglages d'origine (une confirmation est demandée si le mode est actif).\r\n\r\n" +
+                "Vérification après une session : dans une invite de commandes, lance\r\n" +
+                "      powercfg /sleepstudy\r\n" +
+                "et regarde si une session de veille apparaît sur la période.";
+
+            MessageBox.Show(this, message, AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ----- Arrière-plan et fermeture -----------------------------------
+
+        // Masquer la carte ne quitte jamais : l'application reste en vie (icône près de
+        // l'horloge) et continue de porter la demande d'éveil. Seul le menu « Quitter »
+        // arrête vraiment Sleepr — c'est précisément ce qui protège un calcul long.
+        private void MinimizeToBackground()
+        {
+            MinimizeToBackground(true);
+        }
+
+        private void MinimizeToBackground(bool notify)
+        {
+            Hide();
+
+            if (!notify || _balloonShown) return;
+            _balloonShown = true;
+            _tray.BalloonTipTitle = _active ? "Sleepr reste actif" : "Sleepr tourne en arrière-plan";
+            _tray.BalloonTipText = _active
+                ? "Le PC reste éveillé. Rouvre la carte par l'icône près de l'horloge ; « Quitter » arrête vraiment Sleepr."
+                : "Rouvre la carte par l'icône près de l'horloge ; « Quitter » arrête vraiment Sleepr.";
+            _tray.ShowBalloonTip(5000);
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+
+            // Position mémorisée d'une session à l'autre, si elle est encore visible.
+            Point saved;
+            if (PositionStore.TryRead(out saved) && PositionStore.IsOnScreen(saved, _surface))
+                Location = saved;
+
+            if (_startHidden) MinimizeToBackground(false);
+            else Render();
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            // Fermer (×, Alt+F4) ne quitte jamais : la carte disparaît du bureau et de la
+            // barre des tâches, mais l'application continue de tourner et reste accessible
+            // par l'icône de la zone de notification. La demande d'éveil continue aussi.
+            //
+            // TaskManagerClosing couvre les fermetures venues de l'extérieur (gestionnaire
+            // de tâches, un programme qui poste WM_CLOSE) : elles non plus ne doivent pas
+            // couper la protection par surprise. Un vrai arrêt de Windows, lui, passe.
+            if (!_exitRequested &&
+                (e.CloseReason == CloseReason.UserClosing || e.CloseReason == CloseReason.TaskManagerClosing))
+            {
+                e.Cancel = true;
+                // Masquer la fenêtre depuis l'événement de fermeture arrête la boucle de
+                // messages (donc l'application, donc la demande d'éveil) : on diffère le
+                // masquage d'un tour, une fois la fermeture annulée.
+                BeginInvoke(new MethodInvoker(delegate { MinimizeToBackground(true); }));
+                return;
+            }
+
+            if (!_active) ReleaseExecutionState();
+            base.OnFormClosing(e);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (!IsHandleCreated) return;
+            UpdateLayout();
+            Render();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+                _timer.Stop();
+                _timer.Dispose();
+                _animation.Stop();
+                _animation.Dispose();
+                _tray.Visible = false;
+                _tray.Dispose();
+                if (_iconOn != null) _iconOn.Dispose();
+                if (_iconOff != null) _iconOff.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        // ----- Petits utilitaires de dessin --------------------------------
+
+        private static GraphicsPath RoundedRect(Rectangle bounds, int radius)
+        {
+            int d = Math.Max(1, radius) * 2;
+            GraphicsPath path = new GraphicsPath();
+            path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
+            path.AddArc(bounds.Right - d - 1, bounds.Y, d, d, 270, 90);
+            path.AddArc(bounds.Right - d - 1, bounds.Bottom - d - 1, d, d, 0, 90);
+            path.AddArc(bounds.X, bounds.Bottom - d - 1, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        private static Color Blend(Color from, Color to, float amount)
+        {
+            if (amount < 0f) amount = 0f;
+            if (amount > 1f) amount = 1f;
+            return Color.FromArgb(
+                (int)Math.Round(from.R + (to.R - from.R) * amount),
+                (int)Math.Round(from.G + (to.G - from.G) * amount),
+                (int)Math.Round(from.B + (to.B - from.B) * amount));
+        }
+    }
+
+    [Flags]
+    internal enum ExecutionState : uint
+    {
+        None = 0,
+        SystemRequired = 0x00000001,
+        DisplayRequired = 0x00000002,
+        Continuous = 0x80000000
+    }
+
+    // Fonctions Win32 utilisées par l'application.
+    internal static class Native
+    {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern ExecutionState SetThreadExecutionState(ExecutionState esFlags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool AttachConsole(int processId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool DestroyIcon(IntPtr handle);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT
+        {
+            public int X;
+            public int Y;
+
+            public POINT(int x, int y)
+            {
+                X = x;
+                Y = y;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SIZE
+        {
+            public int Width;
+            public int Height;
+
+            public SIZE(int width, int height)
+            {
+                Width = width;
+                Height = height;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct BLENDFUNCTION
+        {
+            public byte BlendOp;
+            public byte BlendFlags;
+            public byte SourceConstantAlpha;
+            public byte AlphaFormat;
+        }
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        public static extern bool DeleteDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr SelectObject(IntPtr hdc, IntPtr hObject);
+
+        [DllImport("gdi32.dll")]
+        public static extern bool DeleteObject(IntPtr hObject);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, IntPtr pptDst, ref SIZE psize,
+            IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+    }
+
+    internal static class Program
+    {
+        [STAThread]
+        private static int Main(string[] args)
+        {
+            string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "--gui";
+
+            if (mode == "--on" || mode == "--off" || mode == "--status" || mode == "--startup")
+                return RunCommandLine(mode, args);
+
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            // Une erreur inattendue est écrite dans %LOCALAPPDATA%\Sleepr\crash.txt et
+            // n'arrête pas l'application : sans elle, plus aucune demande d'éveil.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
+            {
+                CrashLog.Write("Exception d'interface", e.Exception);
+            };
+            AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+            {
+                CrashLog.Write("Exception non gérée", e.ExceptionObject as Exception);
+            };
+
+            bool created;
+            using (Mutex mutex = new Mutex(true, "Sleepr_single_instance", out created))
+            {
+                if (!created)
+                {
+                    MessageBox.Show("Sleepr est déjà lancé : cherche son icône près de l'horloge.",
+                        "Sleepr", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return 0;
+                }
+
+                Application.Run(new MainForm(mode == "--tray"));
+                GC.KeepAlive(mutex);
+            }
+            return 0;
+        }
+
+        private static int RunCommandLine(string mode, string[] args)
+        {
+            Native.AttachConsole(-1); // pour afficher la sortie dans la console appelante
+
+            string error;
+
+            if (mode == "--startup")
+            {
+                if (args.Length > 1)
+                {
+                    string value = args[1].ToLowerInvariant();
+                    bool enabled;
+                    if (value == "on" || value == "1" || value == "oui") enabled = true;
+                    else if (value == "off" || value == "0" || value == "non") enabled = false;
+                    else
+                    {
+                        Console.WriteLine("Usage : Sleepr.exe --startup on|off");
+                        return 1;
+                    }
+
+                    if (!AutoStart.Set(enabled, out error))
+                    {
+                        Console.WriteLine("ERREUR : " + error);
+                        return 1;
+                    }
+                }
+
+                Console.WriteLine(AutoStart.IsEnabled ? "demarrage=actif" : "demarrage=inactif");
+                return 0;
+            }
+
+            if (mode == "--on")
+            {
+                bool ok = ModeState.Activate(true, out error);
+                if (!ok)
+                {
+                    Console.WriteLine("ERREUR : " + error);
+                    return 1;
+                }
+                Console.WriteLine("Sleepr activé (veille/hibernation désactivées, capot et bouton ignorés).");
+                Console.WriteLine(PowerCfg.DescribeCurrent());
+
+                // Les réglages powercfg ne suffisent pas : la demande d'éveil n'existe que
+                // tant que l'interface tourne. On la lance donc ici, sinon la ligne de
+                // commande laisserait le PC s'endormir capot fermé.
+                if (EnsureGuiRunning())
+                    Console.WriteLine("Interface lancée : elle maintient la demande d'éveil.");
+                else
+                    Console.WriteLine("ATTENTION : impossible de lancer l'interface ; le PC peut s'endormir.");
+                return 0;
+            }
+
+            if (mode == "--off")
+            {
+                bool ok = ModeState.Deactivate(out error);
+                if (!ok)
+                {
+                    Console.WriteLine("ERREUR : " + error);
+                    return 1;
+                }
+                Console.WriteLine("Mode normal restauré.");
+                Console.WriteLine(PowerCfg.DescribeCurrent());
+                return 0;
+            }
+
+            Console.WriteLine(ModeState.IsActive ? "mode=actif" : "mode=normal");
+            Console.WriteLine(PowerCfg.DescribeCurrent());
+            Console.WriteLine(IsGuiRunning()
+                ? (ModeState.IsActive
+                    ? "interface=lancee (demande d'éveil tenue)"
+                    : "interface=lancee (mode normal)")
+                : "interface=arretee (aucune demande d'éveil)");
+            return 0;
+        }
+
+        // L'interface est le seul porteur de la demande d'éveil : sans elle, le mode
+        // n'empêche rien. On la détecte par son processus (le processus courant, qui
+        // est aussi Sleepr.exe en ligne de commande, ne compte pas).
+        private static bool IsGuiRunning()
+        {
+            int self = Process.GetCurrentProcess().Id;
+            foreach (Process p in Process.GetProcessesByName("Sleepr"))
+            {
+                try
+                {
+                    if (p.Id != self) return true;
+                }
+                finally
+                {
+                    p.Dispose();
+                }
+            }
+            return false;
+        }
+
+        private static bool EnsureGuiRunning()
+        {
+            if (IsGuiRunning()) return true;
+
+            try
+            {
+                // ShellExecute (et non CreateProcess) : le processus lancé n'hérite pas des
+                // tubes de la console appelante, sinon un « --on » dans un script resterait
+                // bloqué tant que l'interface tourne.
+                Process.Start(Application.ExecutablePath);
+                Thread.Sleep(1500);   // le temps que la fenêtre pose la demande d'éveil
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+}

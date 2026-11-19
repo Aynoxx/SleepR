@@ -19,19 +19,26 @@ La fenêtre est une petite **carte flottante** aux coins arrondis et légèremen
 devine le fond du bureau au travers). Elle contient l'état courant, un interrupteur rond
 gauche/droite, et une ligne d'indice discrète : rien d'autre, pas de barre de titre.
 
-- **Déplacer** : maintiens un clic n'importe où sur la carte et fais-la glisser.
-- **Mettre en arrière-plan** : le **×** en haut à droite.
+- **Déplacer** : maintiens un clic n'importe où sur la carte et fais-la glisser (le curseur
+  devient une croix de déplacement) ; la position est mémorisée pour les fois suivantes.
+- **Masquer** : le **×** en haut à droite (ou **Échap**) — la carte disparaît, l'application
+  continue de tourner et le PC reste éveillé.
+- **Basculer** : l'interrupteur, un double-clic sur la carte, ou Espace/Entrée quand la carte a le
+  focus.
 - **Menu** : clic droit sur la carte (ou sur l'icône près de l'horloge).
 
 Le fond est composé **pixel par pixel** (fenêtre superposée), pas par une couleur « trou » :
 texte et interrupteur restent nets sur n'importe quel fond, et les zones réellement transparentes
 laissent passer les clics vers la fenêtre du dessous.
 
-Fermer la fenêtre (le **×** ou Alt+F4) **ne quitte pas** : l'application continue en arrière-plan,
-sans bouton dans la barre des tâches. En survolant son icône près de l'horloge, le résumé des
-applications affiche l'état (`Sleepr — actif` ou `Sleepr — normal`) ; l'icône change aussi de
-couleur (verte en mode actif, grise sinon). Pour arrêter complètement : clic droit sur l'icône près
-de l'horloge → **Quitter** (les réglages d'origine sont alors restaurés).
+Fermer la fenêtre (le **×**, **Échap** ou Alt+F4) **ne quitte pas** et **ne coupe pas la
+protection** : la carte disparaît, sans bouton dans la barre des tâches, mais l'application reste
+vivante près de l'horloge et continue de porter la demande d'éveil. Rouvre-la par un clic sur son
+icône (ou un double-clic) ; en la survolant, le résumé des applications affiche l'état
+(`Sleepr — actif` ou `Sleepr — normal`) et l'icône change de couleur (verte en mode actif, grise
+sinon). Pour arrêter complètement : clic droit sur la carte ou sur l'icône → **Quitter** (les
+réglages d'origine sont alors restaurés ; si le mode est actif, une confirmation est demandée,
+car quitter rend la mise en veille possible).
 
 ## Ce que fait le mode actif
 
@@ -93,6 +100,9 @@ inactif.
 - **Vérifier après une session** : dans une invite de commandes, lance `powercfg /sleepstudy` et
   ouvre le rapport. Si une session de veille recouvre la période, le PC s'est endormi malgré le mode.
   `powercfg /requests` (en administrateur) montre les demandes d'éveil actives.
+- **Si quelque chose se passe mal**, la trace est écrite dans `%LOCALAPPDATA%\Sleepr\crash.txt` :
+  l'application journalise les erreurs inattendues et continue de tourner au lieu de disparaître
+  en silence.
 
 Si le PC s'endort malgré tout, la solution la plus fiable est de le laisser branché à un écran
 externe (mode « clamshell ») ; l'alternative — forcer la veille S3 via le registre
