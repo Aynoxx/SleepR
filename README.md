@@ -66,48 +66,6 @@ restauration. Une sauvegarde de l'ancien nom (`%LOCALAPPDATA%\ModeIA\etat.txt`) 
 automatiquement au premier lancement. Supprimer ce fichier revient à considérer que le mode est
 inactif.
 
-## Points importants sur ce PC (HP ProBook 440 G10)
-
-- La machine est en **veille moderne (S0)**, pas en veille S3. Conséquence : le réglage « action du
-  capot » est **masqué** dans les Paramètres de Windows (`ATTRIB_HIDE`) et n'apparaît pas dans
-  `powercfg /query`. L'application l'écrit quand même dans le mode d'alimentation ; vérifié sur cette
-  machine : la valeur passe de `1` (veille) à `0` (ne rien faire), puis revient à `1` à la
-  désactivation.
-- **Le capot fermé n'affiche plus l'écran de connexion.** Fermer le capot éteint brièvement
-  l'écran, et Windows verrouille alors la session : au retour, on retombe sur l'écran de
-  connexion même si la machine ne s'est jamais endormie. Sur une machine en veille moderne
-  (S0), ce délai n'est pas le réglage `CONSOLELOCK` (absent, `powercfg` refuse même de le
-  lire) mais la valeur utilisateur `HKCU\Control Panel\Desktop\DelayLockInterval`, en
-  secondes, où `0xFFFFFFFF` signifie « ne jamais demander ». Sleepr l'écrit et restaure
-  l'ancienne valeur à la sortie, sans droits administrateur. À savoir : ouvrir la page
-  « Options de connexion » des Paramètres réécrit cette valeur.
-- **Deux réglages cachés peuvent annuler la demande d'éveil.** Windows n'obéit à
-  `SetThreadExecutionState` que si les autorisations « Allow system required requests »
-  (`SYSTEMREQUIRED`) et « Allow display required policy » (`ALLOWDISPLAY`) valent « oui ». Elles
-  sont masquées dans les Paramètres de Windows et peuvent être à « non » sur certaines
-  configurations : Sleepr les force à `1` (secteur et batterie) puis les restaure.
-- **La seule limite qui reste est l'action à batterie critique** (`BATACTIONCRIT`, par défaut
-  « mettre en veille » à 5 %). Elle endort la machine quel que soit le mode, et il n'existe pas
-  d'autre levier propre que de la neutraliser — au prix d'un arrêt brutal à 0 % :
-  `powercfg /setdcvalueindex SCHEME_CURRENT SUB_BATTERY BATACTIONCRIT 0` (annulable avec la valeur
-  d'origine, `1`). L'application ne le fait pas d'elle-même. Sur batterie, elle affiche un
-  avertissement orange.
-- **Garde l'application lancée** (fenêtre ou icône près de l'horloge) : c'est elle qui porte la
-  demande d'éveil. Les réglages `powercfg` restent en place si tu la fermes brutalement, mais sans
-  la demande d'éveil le PC peut s'endormir à l'expiration du délai de veille.
-- **Ventilation** : capot fermé, le PC évacue moins bien la chaleur. Pose-le sur une surface dure,
-  ne le mets pas dans une housse, et surveille la température sur un calcul de plusieurs heures.
-- **Vérifier après une session** : dans une invite de commandes, lance `powercfg /sleepstudy` et
-  ouvre le rapport. Si une session de veille recouvre la période, le PC s'est endormi malgré le mode.
-  `powercfg /requests` (en administrateur) montre les demandes d'éveil actives.
-- **Si quelque chose se passe mal**, la trace est écrite dans `%LOCALAPPDATA%\Sleepr\crash.txt` :
-  l'application journalise les erreurs inattendues et continue de tourner au lieu de disparaître
-  en silence.
-
-Si le PC s'endort malgré tout, la solution la plus fiable est de le laisser branché à un écran
-externe (mode « clamshell ») ; l'alternative — forcer la veille S3 via le registre
-(`PlatformAoAcOverride`) — n'est pas supportée par Microsoft et n'est pas nécessaire ici.
-
 ## Ligne de commande (pratique pour tester)
 
 ```
